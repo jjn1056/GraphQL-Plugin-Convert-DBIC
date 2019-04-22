@@ -241,7 +241,7 @@ sub to_graphql {
   my @ast;
   my (
     %name2type, %name2column21, %name2pk21, %name2fk21, %name2rel21,
-    %name2column2rawtype, %seentype, %name2isview,
+    %name2column2rawtype, %seentype, %name2isview, %name2uniq21
   );
   for my $source (map $dbic_schema->source($_), $dbic_schema->sources) {
     my $name = _dbicsource2pretty($source);
@@ -250,6 +250,10 @@ sub to_graphql {
     my %fields;
     my $columns_info = $source->columns_info;
     $name2pk21{$name} = +{ map { ($_ => 1) } $source->primary_columns };
+
+    # Unique constraint info
+    $name2uniq21{$name} = +{ $source->unique_constraints };
+
     my %rel2info = map {
       ($_ => $source->relationship_info($_))
     } $source->relationships;
@@ -317,6 +321,7 @@ sub to_graphql {
         my $type = $name2type{$name};
         my $pksearch_name = lcfirst $name;
         my $pksearch_name_plural = to_PL($pksearch_name);
+
         my $input_search_name = "search$name";
         # TODO now only one deep, no handle fragments or abstract types
         $root_value{$pksearch_name} = sub {
@@ -356,7 +361,7 @@ sub to_graphql {
             )
           ];
         };
-        (
+        my @root_fields = (
           keys %{ $name2pk21{$name} } ? (
             # the PK (singular) query
             $pksearch_name => {
@@ -393,7 +398,40 @@ sub to_graphql {
               },
             },
           },
-        )
+        );
+
+        foreach my $unique_constraint_name (keys %{ $name2uniq21{$name} }) {
+          my $local_name = "${pksearch_name}_${unique_constraint_name}";
+          push @root_fields, $local_name => +{
+            type => $name,
+            args => {
+              map {
+                $_ => {
+                  type =>
+                    _apply_modifier('non_null', $type->{fields}{$_}{type})
+                }
+              } @{$name2uniq21{$name}{$unique_constraint_name}}
+            },
+          };
+          $root_value{$local_name} = sub {
+            my ($args, $content, $info) = @_;
+            use Devel::Dwarn; Dwarn $args;
+            my @subfieldrels = _subfieldrels($name, \%name2rel21, $info->{field_nodes});
+            DEBUG and _debug('DBIC.root_value', @subfieldrels);
+            $dbic_schema->resultset($name)->find(
+              $args,
+              { prefetch => \@subfieldrels }
+            );
+          };
+        }
+
+        # 
+        use Devel::Dwarn;
+        Dwarn '.......';
+        #Dwarn $name2uniq21{$name};
+        #Dwarn \@root_fields;
+        Dwarn \%root_value;
+        @root_fields;
       } keys %name2type
     },
   };
